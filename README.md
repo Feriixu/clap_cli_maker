@@ -4,6 +4,8 @@ A desktop app (egui/eframe) for visual design of a [clap](https://docs.rs/clap) 
 CLI. It builds commands, subcommands, arguments, and shared arg groups, then generates the
 matching Rust `struct`/`enum` definitions.
 
+:warning: Here be AI slop. The code is almost entirely generated, but not one-shot. I influenced the development with many suggestions.
+
 ## Running
 
 ```sh
