@@ -452,10 +452,12 @@ fn render_args_list(ui: &mut egui::Ui, args: &mut Vec<ArgDef>) {
         );
     }
 
+    let siblings: Vec<(Uuid, String)> = args.iter().map(|a| (a.id, a.name.clone())).collect();
+
     let mut remove_idx = None;
     for (i, arg) in args.iter_mut().enumerate() {
         egui::Frame::group(ui.style()).show(ui, |ui| {
-            render_arg(ui, arg);
+            render_arg(ui, arg, &siblings);
             if ui.small_button("Remove this argument").clicked() {
                 remove_idx = Some(i);
             }
@@ -463,7 +465,11 @@ fn render_args_list(ui: &mut egui::Ui, args: &mut Vec<ArgDef>) {
         ui.add_space(4.0);
     }
     if let Some(i) = remove_idx {
+        let removed_id = args[i].id;
         args.remove(i);
+        for arg in args.iter_mut() {
+            arg.conflicts_with.retain(|id| *id != removed_id);
+        }
     }
     ui.horizontal(|ui| {
         if ui.button("+ Add option/flag").clicked() {
@@ -477,7 +483,7 @@ fn render_args_list(ui: &mut egui::Ui, args: &mut Vec<ArgDef>) {
     });
 }
 
-fn render_arg(ui: &mut egui::Ui, arg: &mut ArgDef) {
+fn render_arg(ui: &mut egui::Ui, arg: &mut ArgDef, siblings: &[(Uuid, String)]) {
     ui.push_id(arg.id, |ui| {
         egui::Grid::new("arg_grid")
             .num_columns(2)
@@ -585,6 +591,17 @@ fn render_arg(ui: &mut egui::Ui, arg: &mut ArgDef) {
                     });
                     ui.end_row();
                 }
+
+                ui.label("Env var");
+                let mut env_text = arg.env.clone().unwrap_or_default();
+                if ui.text_edit_singleline(&mut env_text).changed() {
+                    arg.env = if env_text.trim().is_empty() {
+                        None
+                    } else {
+                        Some(env_text)
+                    };
+                }
+                ui.end_row();
             });
 
         ui.collapsing("Choices (generates a ValueEnum type)", |ui| {
@@ -602,6 +619,23 @@ fn render_arg(ui: &mut egui::Ui, arg: &mut ArgDef) {
             }
             if ui.small_button("+ choice").clicked() {
                 arg.choices.push(String::new());
+            }
+        });
+
+        let others: Vec<&(Uuid, String)> = siblings.iter().filter(|(id, _)| *id != arg.id).collect();
+        ui.collapsing("Conflicts with", |ui| {
+            if others.is_empty() {
+                ui.label("No other args in this list yet.");
+            }
+            for (id, name) in &others {
+                let mut checked = arg.conflicts_with.contains(id);
+                if ui.checkbox(&mut checked, name.as_str()).changed() {
+                    if checked {
+                        arg.conflicts_with.push(*id);
+                    } else {
+                        arg.conflicts_with.retain(|c| c != id);
+                    }
+                }
             }
         });
     });

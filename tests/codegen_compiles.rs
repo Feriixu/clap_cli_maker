@@ -30,6 +30,7 @@ fn build_comprehensive_project() -> Project {
     verbose.ty = RustType::Bool;
     verbose.short = true;
     verbose.help = "Enable verbose output".to_string();
+    verbose.env = Some("KITCHEN_SINK_VERBOSE".to_string());
     project.root.args.push(verbose);
 
     let mut level = ArgDef::new_named("level");
@@ -51,11 +52,27 @@ fn build_comprehensive_project() -> Project {
     let mut common = FlattenGroup::new("Common Args");
     let mut keygrip = ArgDef::new_named("keygrip");
     keygrip.required = false;
+    keygrip.env = Some("OPENPGP_KEYGRIP".to_string());
+    let keygrip_id = keygrip.id;
     common.args.push(keygrip);
     let mut bind_ip = ArgDef::new_named("bind-ip");
     bind_ip.ty = RustType::Custom("std::net::IpAddr".to_string());
     bind_ip.default_value = Some("127.0.0.1".to_string());
     common.args.push(bind_ip);
+
+    // `pin` conflicts with a single other arg -> `conflicts_with`.
+    let mut pin = ArgDef::new_named("pin");
+    pin.required = false;
+    pin.conflicts_with.push(keygrip_id);
+    let pin_id = pin.id;
+    common.args.push(pin);
+
+    // `raw-secret-key` conflicts with two others -> `conflicts_with_all`.
+    let mut raw_secret_key = ArgDef::new_named("raw-secret-key");
+    raw_secret_key.required = false;
+    raw_secret_key.conflicts_with = vec![keygrip_id, pin_id];
+    common.args.push(raw_secret_key);
+
     let common_id = common.id;
 
     let mut generate = FlattenGroup::new("Generate Args");
@@ -151,7 +168,7 @@ version = "0.0.0"
 edition = "2021"
 
 [dependencies]
-clap = { version = "4", features = ["derive"] }
+clap = { version = "4", features = ["derive", "env"] }
 "#,
     )
     .expect("write scratch Cargo.toml");

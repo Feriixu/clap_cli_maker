@@ -33,6 +33,7 @@ struct Ctx {
     uses_subcommand: bool,
     uses_args: bool,
     uses_value_enum: bool,
+    uses_env: bool,
     used_groups: HashSet<Uuid>,
 }
 
@@ -82,7 +83,7 @@ fn gen_flatten_group_struct(group: &FlattenGroup, ctx: &mut Ctx) {
     let scope = group.display_ident();
     let mut fields = String::new();
     for arg in &group.args {
-        fields.push_str(&gen_field(arg, &scope, ctx));
+        fields.push_str(&gen_field(arg, &scope, &group.args, ctx));
     }
     ctx.items.push(format!(
         "#[derive(Args, Debug)]\npub struct {scope} {{\n{fields}}}\n"
@@ -97,6 +98,7 @@ pub fn generate_source(project: &Project) -> String {
         uses_subcommand: false,
         uses_args: false,
         uses_value_enum: false,
+        uses_env: false,
         used_groups: HashSet::new(),
     };
     let groups = &project.flatten_groups;
@@ -104,7 +106,7 @@ pub fn generate_source(project: &Project) -> String {
     let root = &project.root;
     let mut fields = String::new();
     for arg in &root.args {
-        fields.push_str(&gen_field(arg, "Cli", &mut ctx));
+        fields.push_str(&gen_field(arg, "Cli", &root.args, &mut ctx));
     }
     fields.push_str(&gen_flatten_fields(&root.flattens, groups, &mut ctx));
     if !root.subcommands.is_empty() {
@@ -129,6 +131,13 @@ pub fn generate_source(project: &Project) -> String {
     }
 
     let mut out = String::new();
+
+    if ctx.uses_env {
+        out.push_str(
+            "// This file uses `env = \"...\"` on some args, which needs clap's \"env\" feature:\n\
+             // clap = { version = \"4\", features = [\"derive\", \"env\"] }\n",
+        );
+    }
 
     let mut clap_items = vec!["Parser"];
     if ctx.uses_subcommand {
@@ -224,7 +233,7 @@ fn gen_args_struct(
     ctx.uses_args = true;
     let mut fields = String::new();
     for arg in &node.args {
-        fields.push_str(&gen_field(arg, scope, ctx));
+        fields.push_str(&gen_field(arg, scope, &node.args, ctx));
     }
     fields.push_str(&gen_flatten_fields(&node.flattens, groups, ctx));
     if !node.subcommands.is_empty() {
@@ -283,7 +292,7 @@ fn normalize_variant_ident(raw: &str) -> String {
     s
 }
 
-fn gen_field(arg: &ArgDef, scope: &str, ctx: &mut Ctx) -> String {
+fn gen_field(arg: &ArgDef, scope: &str, siblings: &[ArgDef], ctx: &mut Ctx) -> String {
     let field_name = normalize_field_ident(&arg.name);
     let mut lines = String::new();
     for line in arg.help.lines() {
@@ -299,6 +308,8 @@ fn gen_field(arg: &ArgDef, scope: &str, ctx: &mut Ctx) -> String {
         if parts.is_empty() {
             parts.push("long".to_string());
         }
+        push_env(arg, &mut parts, ctx);
+        push_conflicts(arg, siblings, &mut parts);
         lines.push_str(&format!("    #[arg({})]\n", parts.join(", ")));
         lines.push_str(&format!("    pub {field_name}: bool,\n"));
         return lines;
@@ -342,6 +353,8 @@ fn gen_field(arg: &ArgDef, scope: &str, ctx: &mut Ctx) -> String {
         && !dv.trim().is_empty() {
             parts.push(format!("default_value = {:?}", dv));
         }
+    push_env(arg, &mut parts, ctx);
+    push_conflicts(arg, siblings, &mut parts);
     if arg.multiple && arg.required {
         parts.push("required = true".to_string());
     }
@@ -363,6 +376,42 @@ fn push_short_long(arg: &ArgDef, parts: &mut Vec<String>) {
         match &arg.long_name {
             Some(n) if !n.trim().is_empty() => parts.push(format!("long = {:?}", n.trim())),
             _ => parts.push("long".to_string()),
+        }
+    }
+}
+
+fn push_env(arg: &ArgDef, parts: &mut Vec<String>, ctx: &mut Ctx) {
+    if let Some(env) = &arg.env {
+        let env = env.trim();
+        if !env.is_empty() {
+            parts.push(format!("env = {:?}", env));
+            ctx.uses_env = true;
+        }
+    }
+}
+
+/// Resolves `arg.conflicts_with` (ids into `siblings`, the same args list
+/// this arg lives in) to field names, emitting `conflicts_with` for a
+/// single target or `conflicts_with_all` for two or more. Dangling ids
+/// (the target arg was deleted) and self-references are silently skipped.
+fn push_conflicts(arg: &ArgDef, siblings: &[ArgDef], parts: &mut Vec<String>) {
+    let names: Vec<String> = arg
+        .conflicts_with
+        .iter()
+        .filter(|id| **id != arg.id)
+        .filter_map(|id| siblings.iter().find(|s| s.id == *id))
+        .map(|s| normalize_field_ident(&s.name))
+        .collect();
+    match names.as_slice() {
+        [] => {}
+        [one] => parts.push(format!("conflicts_with = {:?}", one)),
+        many => {
+            let list = many
+                .iter()
+                .map(|n| format!("{n:?}"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            parts.push(format!("conflicts_with_all = [{list}]"));
         }
     }
 }

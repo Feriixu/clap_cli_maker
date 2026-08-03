@@ -320,6 +320,14 @@ pub struct ArgDef {
     /// Non-empty enables a generated `#[derive(ValueEnum)]` type for this
     /// arg, one variant per choice, instead of using `ty`.
     pub choices: Vec<String>,
+    /// `#[arg(env = "...")]` — falls back to this environment variable when
+    /// the arg isn't given on the command line.
+    pub env: Option<String>,
+    /// Ids of other args in the same args list (the same command's own
+    /// args, or the same flatten group's args) that this arg conflicts
+    /// with. Resolved to `conflicts_with` / `conflicts_with_all` at codegen
+    /// time depending on how many are set.
+    pub conflicts_with: Vec<Uuid>,
 }
 
 impl ArgDef {
@@ -338,6 +346,8 @@ impl ArgDef {
             long: true,
             long_name: None,
             choices: Vec::new(),
+            env: None,
+            conflicts_with: Vec::new(),
         }
     }
 
@@ -356,6 +366,8 @@ impl ArgDef {
             long: false,
             long_name: None,
             choices: Vec::new(),
+            env: None,
+            conflicts_with: Vec::new(),
         }
     }
 
