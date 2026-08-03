@@ -1,13 +1,19 @@
 use crate::app::Action;
 use crate::codegen;
-use crate::model::{ArgDef, ArgKind, CommandNode, Project, RustType};
+use crate::model::{ArgDef, ArgKind, CommandNode, FlattenGroup, FlattenRef, Project, RustType};
 use crate::storage;
 use heck::ToSnakeCase;
 use uuid::Uuid;
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Selection {
+    Command(Uuid),
+    Group(Uuid),
+}
+
 pub struct EditorState {
     project: Project,
-    selected: Uuid,
+    selected: Selection,
     last_saved_json: String,
     last_raw_code: String,
     cached_code: String,
@@ -16,7 +22,7 @@ pub struct EditorState {
 
 impl EditorState {
     pub fn new(project: Project) -> Self {
-        let selected = project.root.id;
+        let selected = Selection::Command(project.root.id);
         let last_saved_json = serde_json::to_string(&project).unwrap_or_default();
         Self {
             project,
@@ -49,6 +55,12 @@ enum TreeOp {
     Delete(Uuid),
     MoveUp(Uuid),
     MoveDown(Uuid),
+}
+
+enum GroupOp {
+    Select(Uuid),
+    New,
+    Delete(Uuid),
 }
 
 pub fn show(ui: &mut egui::Ui, state: &mut EditorState) -> Option<Action> {
@@ -84,11 +96,48 @@ pub fn show(ui: &mut egui::Ui, state: &mut EditorState) -> Option<Action> {
             ui.separator();
             egui::ScrollArea::vertical()
                 .id_salt("tree_scroll")
+                .max_height(ui.available_height() * 0.55)
                 .show(ui, |ui| {
                     let root_id = state.project.root.id;
+                    let selected_command = match state.selected {
+                        Selection::Command(id) => Some(id),
+                        Selection::Group(_) => None,
+                    };
                     let mut ops: Vec<TreeOp> = Vec::new();
-                    render_tree(ui, &state.project.root, state.selected, 0, root_id, &mut ops);
+                    render_tree(ui, &state.project.root, selected_command, 0, root_id, &mut ops);
                     apply_tree_ops(state, ops);
+                });
+
+            ui.separator();
+            ui.heading("Shared arg groups");
+            egui::ScrollArea::vertical()
+                .id_salt("groups_scroll")
+                .show(ui, |ui| {
+                    let selected_group = match state.selected {
+                        Selection::Group(id) => Some(id),
+                        Selection::Command(_) => None,
+                    };
+                    let mut ops: Vec<GroupOp> = Vec::new();
+                    for group in &state.project.flatten_groups {
+                        ui.horizontal(|ui| {
+                            if ui
+                                .selectable_label(
+                                    selected_group == Some(group.id),
+                                    group.display_ident(),
+                                )
+                                .clicked()
+                            {
+                                ops.push(GroupOp::Select(group.id));
+                            }
+                            if ui.small_button("delete").clicked() {
+                                ops.push(GroupOp::Delete(group.id));
+                            }
+                        });
+                    }
+                    if ui.button("+ New group").clicked() {
+                        ops.push(GroupOp::New);
+                    }
+                    apply_group_ops(state, ops);
                 });
         });
 
@@ -129,12 +178,29 @@ pub fn show(ui: &mut egui::Ui, state: &mut EditorState) -> Option<Action> {
         let selected = state.selected;
         egui::ScrollArea::vertical()
             .id_salt("props_scroll")
-            .show(ui, |ui| {
-                let is_root = selected == state.project.root.id;
-                if let Some(node) = state.project.root.find_mut(selected) {
-                    render_properties(ui, node, is_root);
-                } else {
-                    ui.label("Select a command from the tree on the left.");
+            .show(ui, |ui| match selected {
+                Selection::Command(id) => {
+                    let groups_summary: Vec<(Uuid, String)> = state
+                        .project
+                        .flatten_groups
+                        .iter()
+                        .map(|g| (g.id, g.display_ident()))
+                        .collect();
+                    let is_root = id == state.project.root.id;
+                    if let Some(node) = state.project.root.find_mut(id) {
+                        render_properties(ui, node, is_root, &groups_summary);
+                    } else {
+                        ui.label("Select a command from the tree on the left.");
+                    }
+                }
+                Selection::Group(id) => {
+                    if let Some(group) =
+                        state.project.flatten_groups.iter_mut().find(|g| g.id == id)
+                    {
+                        render_group_properties(ui, group);
+                    } else {
+                        ui.label("Select a shared arg group on the left.");
+                    }
                 }
             });
     });
@@ -145,7 +211,7 @@ pub fn show(ui: &mut egui::Ui, state: &mut EditorState) -> Option<Action> {
 fn render_tree(
     ui: &mut egui::Ui,
     node: &CommandNode,
-    selected: Uuid,
+    selected: Option<Uuid>,
     depth: usize,
     root_id: Uuid,
     ops: &mut Vec<TreeOp>,
@@ -158,7 +224,7 @@ fn render_tree(
         } else {
             node.name.clone()
         };
-        if ui.selectable_label(selected == node.id, label).clicked() {
+        if ui.selectable_label(selected == Some(node.id), label).clicked() {
             ops.push(TreeOp::Select(node.id));
         }
     });
@@ -187,18 +253,18 @@ fn render_tree(
 fn apply_tree_ops(state: &mut EditorState, ops: Vec<TreeOp>) {
     for op in ops {
         match op {
-            TreeOp::Select(id) => state.selected = id,
+            TreeOp::Select(id) => state.selected = Selection::Command(id),
             TreeOp::AddChild(parent_id) => {
                 if let Some(parent) = state.project.root.find_mut(parent_id) {
                     let new_node = CommandNode::new_sub("new-command");
                     let new_id = new_node.id;
                     parent.subcommands.push(new_node);
-                    state.selected = new_id;
+                    state.selected = Selection::Command(new_id);
                 }
             }
             TreeOp::Delete(id) => {
-                if state.selected == id {
-                    state.selected = state.project.root.id;
+                if state.selected == Selection::Command(id) {
+                    state.selected = Selection::Command(state.project.root.id);
                 }
                 state.project.root.remove_child(id);
             }
@@ -212,7 +278,33 @@ fn apply_tree_ops(state: &mut EditorState, ops: Vec<TreeOp>) {
     }
 }
 
-fn render_properties(ui: &mut egui::Ui, node: &mut CommandNode, is_root: bool) {
+fn apply_group_ops(state: &mut EditorState, ops: Vec<GroupOp>) {
+    for op in ops {
+        match op {
+            GroupOp::Select(id) => state.selected = Selection::Group(id),
+            GroupOp::New => {
+                let n = state.project.flatten_groups.len() + 1;
+                let group = FlattenGroup::new(&format!("Shared Args {n}"));
+                let new_id = group.id;
+                state.project.flatten_groups.push(group);
+                state.selected = Selection::Group(new_id);
+            }
+            GroupOp::Delete(id) => {
+                if state.selected == Selection::Group(id) {
+                    state.selected = Selection::Command(state.project.root.id);
+                }
+                state.project.remove_flatten_group(id);
+            }
+        }
+    }
+}
+
+fn render_properties(
+    ui: &mut egui::Ui,
+    node: &mut CommandNode,
+    is_root: bool,
+    groups: &[(Uuid, String)],
+) {
     ui.heading(if is_root { "Root command" } else { "Subcommand" });
 
     egui::Grid::new("node_meta")
@@ -244,13 +336,107 @@ fn render_properties(ui: &mut egui::Ui, node: &mut CommandNode, is_root: bool) {
         &mut node.require_subcommand,
         "A subcommand is required (only applies once this command has subcommands)",
     );
+    ui.checkbox(
+        &mut node.args_conflicts_with_subcommands,
+        "This command's own args/flatten groups don't conflict with its subcommand \
+         (args_conflicts_with_subcommands)",
+    );
+    ui.checkbox(
+        &mut node.subcommand_negates_reqs,
+        "Giving a subcommand relaxes this command's required args/flatten groups \
+         (subcommand_negates_reqs)",
+    );
 
+    render_args_list(ui, &mut node.args);
+    render_flatten_refs(ui, &mut node.flattens, groups);
+}
+
+fn render_group_properties(ui: &mut egui::Ui, group: &mut FlattenGroup) {
+    ui.heading("Shared arg group");
+
+    egui::Grid::new("group_meta")
+        .num_columns(2)
+        .spacing([8.0, 6.0])
+        .show(ui, |ui| {
+            ui.label("Name");
+            ui.text_edit_singleline(&mut group.name);
+            ui.end_row();
+
+            ui.label("Ident override");
+            let mut ident_text = group.ident_override.clone().unwrap_or_default();
+            if ui.text_edit_singleline(&mut ident_text).changed() {
+                group.ident_override = if ident_text.trim().is_empty() {
+                    None
+                } else {
+                    Some(ident_text)
+                };
+            }
+            ui.end_row();
+        });
+
+    render_args_list(ui, &mut group.args);
+}
+
+fn render_flatten_refs(ui: &mut egui::Ui, flattens: &mut Vec<FlattenRef>, groups: &[(Uuid, String)]) {
+    ui.separator();
+    ui.heading("Flattened arg groups");
+    if groups.is_empty() {
+        ui.label("No shared arg groups yet — create one in the left panel first.");
+    }
+
+    let mut remove_idx = None;
+    for (i, fref) in flattens.iter_mut().enumerate() {
+        ui.push_id(fref.id, |ui| {
+            ui.horizontal(|ui| {
+                let current_label = groups
+                    .iter()
+                    .find(|(id, _)| *id == fref.group_id)
+                    .map(|(_, name)| name.clone())
+                    .unwrap_or_else(|| "<deleted group>".to_string());
+                egui::ComboBox::from_id_salt("group")
+                    .selected_text(current_label)
+                    .show_ui(ui, |ui| {
+                        for (id, name) in groups {
+                            ui.selectable_value(&mut fref.group_id, *id, name);
+                        }
+                    });
+                ui.checkbox(&mut fref.optional, "optional");
+                ui.label("field name:");
+                let mut field_text = fref.field_name_override.clone().unwrap_or_default();
+                if ui
+                    .add(egui::TextEdit::singleline(&mut field_text).desired_width(100.0))
+                    .changed()
+                {
+                    fref.field_name_override = if field_text.trim().is_empty() {
+                        None
+                    } else {
+                        Some(field_text)
+                    };
+                }
+                if ui.small_button("remove").clicked() {
+                    remove_idx = Some(i);
+                }
+            });
+        });
+    }
+    if let Some(i) = remove_idx {
+        flattens.remove(i);
+    }
+    if ui
+        .add_enabled(!groups.is_empty(), egui::Button::new("+ Add flatten"))
+        .clicked()
+    {
+        flattens.push(FlattenRef::new(groups[0].0));
+    }
+}
+
+fn render_args_list(ui: &mut egui::Ui, args: &mut Vec<ArgDef>) {
     ui.separator();
     ui.heading("Arguments & options");
 
     let mut seen = std::collections::HashSet::new();
     let mut dupes = std::collections::HashSet::new();
-    for arg in &node.args {
+    for arg in args.iter() {
         let normalized = arg.name.to_snake_case();
         if !seen.insert(normalized.clone()) {
             dupes.insert(normalized);
@@ -267,9 +453,9 @@ fn render_properties(ui: &mut egui::Ui, node: &mut CommandNode, is_root: bool) {
     }
 
     let mut remove_idx = None;
-    for i in 0..node.args.len() {
+    for (i, arg) in args.iter_mut().enumerate() {
         egui::Frame::group(ui.style()).show(ui, |ui| {
-            render_arg(ui, &mut node.args[i]);
+            render_arg(ui, arg);
             if ui.small_button("Remove this argument").clicked() {
                 remove_idx = Some(i);
             }
@@ -277,16 +463,16 @@ fn render_properties(ui: &mut egui::Ui, node: &mut CommandNode, is_root: bool) {
         ui.add_space(4.0);
     }
     if let Some(i) = remove_idx {
-        node.args.remove(i);
+        args.remove(i);
     }
     ui.horizontal(|ui| {
         if ui.button("+ Add option/flag").clicked() {
-            let n = node.args.len() + 1;
-            node.args.push(ArgDef::new_named(&format!("option_{n}")));
+            let n = args.len() + 1;
+            args.push(ArgDef::new_named(&format!("option_{n}")));
         }
         if ui.button("+ Add positional").clicked() {
-            let n = node.args.len() + 1;
-            node.args.push(ArgDef::new_positional(&format!("arg_{n}")));
+            let n = args.len() + 1;
+            args.push(ArgDef::new_positional(&format!("arg_{n}")));
         }
     });
 }

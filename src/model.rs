@@ -12,6 +12,10 @@ pub struct Project {
     /// `CARGO_PKG_VERSION` via a bare `#[command(version)]`.
     pub version: Option<String>,
     pub root: CommandNode,
+    /// Reusable arg groups (`#[derive(Args)]` structs) that commands can
+    /// embed via `#[command(flatten)]`. Defined once here so the same
+    /// struct can be shared across multiple commands.
+    pub flatten_groups: Vec<FlattenGroup>,
     /// Extra `use` statements the user wants prepended to the generated
     /// file, e.g. for a custom type used as an argument's type.
     pub extra_uses: Vec<String>,
@@ -26,7 +30,68 @@ impl Project {
             root: CommandNode::new_root(&bin_name),
             name,
             version: Some("0.1.0".to_string()),
+            flatten_groups: Vec::new(),
             extra_uses: Vec::new(),
+        }
+    }
+
+    /// Removes a flatten group and strips any reference to it throughout
+    /// the command tree, so no dangling `FlattenRef` is left behind.
+    pub fn remove_flatten_group(&mut self, group_id: Uuid) {
+        self.flatten_groups.retain(|g| g.id != group_id);
+        self.root.remove_flatten_refs(group_id);
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FlattenGroup {
+    pub id: Uuid,
+    /// Human label for this group, e.g. "Common Args". Also the default
+    /// source for the generated struct's identifier.
+    pub name: String,
+    /// Overrides the PascalCase identifier derived from `name` for the
+    /// generated struct. Leave empty to derive it from `name`.
+    pub ident_override: Option<String>,
+    pub args: Vec<ArgDef>,
+}
+
+impl FlattenGroup {
+    pub fn new(name: &str) -> Self {
+        FlattenGroup {
+            id: Uuid::new_v4(),
+            name: name.to_string(),
+            ident_override: None,
+            args: Vec::new(),
+        }
+    }
+
+    pub fn display_ident(&self) -> String {
+        match &self.ident_override {
+            Some(s) if !s.trim().is_empty() => s.to_pascal_case(),
+            _ => self.name.to_pascal_case(),
+        }
+    }
+}
+
+/// A command's embedding of a `FlattenGroup` via `#[command(flatten)]`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FlattenRef {
+    pub id: Uuid,
+    pub group_id: Uuid,
+    /// Overrides the field name for this particular embedding. Leave empty
+    /// to derive it from the group's name.
+    pub field_name_override: Option<String>,
+    /// Wraps the field in `Option<T>` instead of `T`.
+    pub optional: bool,
+}
+
+impl FlattenRef {
+    pub fn new(group_id: Uuid) -> Self {
+        FlattenRef {
+            id: Uuid::new_v4(),
+            group_id,
+            field_name_override: None,
+            optional: false,
         }
     }
 }
@@ -43,7 +108,17 @@ pub struct CommandNode {
     /// Becomes a `///` doc comment, which clap derive reads as the about text.
     pub about: String,
     pub require_subcommand: bool,
+    /// `#[command(args_conflicts_with_subcommands = true)]` — lets this
+    /// command's own args and its subcommand coexist without clap treating
+    /// them as mutually required/conflicting by default.
+    pub args_conflicts_with_subcommands: bool,
+    /// `#[command(subcommand_negates_reqs = true)]` — when a subcommand is
+    /// given, required args/flatten fields on this command are no longer
+    /// enforced.
+    pub subcommand_negates_reqs: bool,
     pub args: Vec<ArgDef>,
+    /// Reusable arg groups embedded via `#[command(flatten)]`.
+    pub flattens: Vec<FlattenRef>,
     pub subcommands: Vec<CommandNode>,
 }
 
@@ -55,7 +130,10 @@ impl CommandNode {
             ident_override: None,
             about: String::new(),
             require_subcommand: true,
+            args_conflicts_with_subcommands: false,
+            subcommand_negates_reqs: false,
             args: Vec::new(),
+            flattens: Vec::new(),
             subcommands: Vec::new(),
         }
     }
@@ -67,7 +145,10 @@ impl CommandNode {
             ident_override: None,
             about: String::new(),
             require_subcommand: true,
+            args_conflicts_with_subcommands: false,
+            subcommand_negates_reqs: false,
             args: Vec::new(),
+            flattens: Vec::new(),
             subcommands: Vec::new(),
         }
     }
@@ -107,6 +188,15 @@ impl CommandNode {
             return true;
         }
         self.subcommands.iter_mut().any(|c| c.move_child(id, delta))
+    }
+
+    /// Strips any `FlattenRef` pointing at `group_id`, anywhere in this
+    /// subtree.
+    pub fn remove_flatten_refs(&mut self, group_id: Uuid) {
+        self.flattens.retain(|f| f.group_id != group_id);
+        for child in &mut self.subcommands {
+            child.remove_flatten_refs(group_id);
+        }
     }
 }
 

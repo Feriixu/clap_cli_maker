@@ -1,8 +1,9 @@
-use crate::model::{ArgDef, ArgKind, CommandNode, Project};
+use crate::model::{ArgDef, ArgKind, CommandNode, FlattenGroup, FlattenRef, Project};
 use heck::{ToKebabCase, ToPascalCase, ToSnakeCase};
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashSet};
 use std::io::Write;
 use std::process::{Command, Stdio};
+use uuid::Uuid;
 
 const RUST_KEYWORDS: &[&str] = &[
     "as", "break", "const", "continue", "crate", "dyn", "else", "enum", "extern", "false", "fn",
@@ -32,6 +33,60 @@ struct Ctx {
     uses_subcommand: bool,
     uses_args: bool,
     uses_value_enum: bool,
+    used_groups: HashSet<Uuid>,
+}
+
+/// Appends `#[command(args_conflicts_with_subcommands = true)]` /
+/// `#[command(subcommand_negates_reqs = true)]` when set. Shared by the root
+/// `Cli` struct and every generated subcommand `Args` struct.
+fn push_subcommand_interaction_settings(node: &CommandNode, parts: &mut Vec<String>) {
+    if node.args_conflicts_with_subcommands {
+        parts.push("args_conflicts_with_subcommands = true".to_string());
+    }
+    if node.subcommand_negates_reqs {
+        parts.push("subcommand_negates_reqs = true".to_string());
+    }
+}
+
+/// Emits `#[command(flatten)]` fields for every `FlattenRef` on a command,
+/// resolving each against the project's shared `FlattenGroup` definitions
+/// and recording which groups actually get used.
+fn gen_flatten_fields(flattens: &[FlattenRef], groups: &[FlattenGroup], ctx: &mut Ctx) -> String {
+    let mut out = String::new();
+    for fref in flattens {
+        let Some(group) = groups.iter().find(|g| g.id == fref.group_id) else {
+            continue;
+        };
+        ctx.uses_args = true;
+        ctx.used_groups.insert(group.id);
+        let group_ident = group.display_ident();
+        let field_source = fref
+            .field_name_override
+            .as_deref()
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or(&group.name);
+        let field_name = normalize_field_ident(field_source);
+        let ty = if fref.optional {
+            format!("Option<{group_ident}>")
+        } else {
+            group_ident
+        };
+        out.push_str("    #[command(flatten)]\n");
+        out.push_str(&format!("    pub {field_name}: {ty},\n"));
+    }
+    out
+}
+
+fn gen_flatten_group_struct(group: &FlattenGroup, ctx: &mut Ctx) {
+    ctx.uses_args = true;
+    let scope = group.display_ident();
+    let mut fields = String::new();
+    for arg in &group.args {
+        fields.push_str(&gen_field(arg, &scope, ctx));
+    }
+    ctx.items.push(format!(
+        "#[derive(Args, Debug)]\npub struct {scope} {{\n{fields}}}\n"
+    ));
 }
 
 /// Builds the raw (unformatted) generated Rust source for a project's CLI.
@@ -42,13 +97,16 @@ pub fn generate_source(project: &Project) -> String {
         uses_subcommand: false,
         uses_args: false,
         uses_value_enum: false,
+        used_groups: HashSet::new(),
     };
+    let groups = &project.flatten_groups;
 
     let root = &project.root;
     let mut fields = String::new();
     for arg in &root.args {
         fields.push_str(&gen_field(arg, "Cli", &mut ctx));
     }
+    fields.push_str(&gen_flatten_fields(&root.flattens, groups, &mut ctx));
     if !root.subcommands.is_empty() {
         ctx.uses_subcommand = true;
         let field_ty = if root.require_subcommand {
@@ -58,7 +116,16 @@ pub fn generate_source(project: &Project) -> String {
         };
         fields.push_str("    #[command(subcommand)]\n");
         fields.push_str(&format!("    pub command: {field_ty},\n"));
-        gen_subcommand_enum(root, None, "Commands", &mut ctx);
+        gen_subcommand_enum(root, None, "Commands", groups, &mut ctx);
+    }
+
+    // Emit shared flatten-group structs after the whole tree has been
+    // walked, so `ctx.used_groups` is complete — only groups actually
+    // referenced somewhere get generated.
+    for group in groups {
+        if ctx.used_groups.contains(&group.id) {
+            gen_flatten_group_struct(group, &mut ctx);
+        }
     }
 
     let mut out = String::new();
@@ -95,6 +162,7 @@ pub fn generate_source(project: &Project) -> String {
         Some(_) => cmd_parts.push("version".to_string()),
         None => {}
     }
+    push_subcommand_interaction_settings(root, &mut cmd_parts);
     out.push_str(&format!("#[command({})]\n", cmd_parts.join(", ")));
     out.push_str("pub struct Cli {\n");
     out.push_str(&fields);
@@ -110,7 +178,13 @@ pub fn generate_source(project: &Project) -> String {
 
 /// scope is the PascalCase path from (but excluding) the root down to
 /// `parent`, e.g. `None` at the root, `Some("Add")`, `Some("AddRemote")`.
-fn gen_subcommand_enum(parent: &CommandNode, parent_scope: Option<&str>, enum_ident: &str, ctx: &mut Ctx) {
+fn gen_subcommand_enum(
+    parent: &CommandNode,
+    parent_scope: Option<&str>,
+    enum_ident: &str,
+    groups: &[FlattenGroup],
+    ctx: &mut Ctx,
+) {
     ctx.uses_subcommand = true;
     let mut body = String::new();
     for child in &parent.subcommands {
@@ -125,13 +199,14 @@ fn gen_subcommand_enum(parent: &CommandNode, parent_scope: Option<&str>, enum_id
         }
         body.push_str(&format!("    #[command(name = {:?})]\n", child.name));
 
-        let is_leaf_empty = child.args.is_empty() && child.subcommands.is_empty();
+        let is_leaf_empty =
+            child.args.is_empty() && child.subcommands.is_empty() && child.flattens.is_empty();
         if is_leaf_empty {
             body.push_str(&format!("    {variant},\n"));
         } else {
             let struct_ident = format!("{child_scope}Args");
             body.push_str(&format!("    {variant}({struct_ident}),\n"));
-            gen_args_struct(child, &child_scope, &struct_ident, ctx);
+            gen_args_struct(child, &child_scope, &struct_ident, groups, ctx);
         }
     }
     ctx.items.push(format!(
@@ -139,12 +214,19 @@ fn gen_subcommand_enum(parent: &CommandNode, parent_scope: Option<&str>, enum_id
     ));
 }
 
-fn gen_args_struct(node: &CommandNode, scope: &str, struct_ident: &str, ctx: &mut Ctx) {
+fn gen_args_struct(
+    node: &CommandNode,
+    scope: &str,
+    struct_ident: &str,
+    groups: &[FlattenGroup],
+    ctx: &mut Ctx,
+) {
     ctx.uses_args = true;
     let mut fields = String::new();
     for arg in &node.args {
         fields.push_str(&gen_field(arg, scope, ctx));
     }
+    fields.push_str(&gen_flatten_fields(&node.flattens, groups, ctx));
     if !node.subcommands.is_empty() {
         let enum_ident = format!("{scope}Commands");
         let field_ty = if node.require_subcommand {
@@ -154,10 +236,15 @@ fn gen_args_struct(node: &CommandNode, scope: &str, struct_ident: &str, ctx: &mu
         };
         fields.push_str("    #[command(subcommand)]\n");
         fields.push_str(&format!("    pub command: {field_ty},\n"));
-        gen_subcommand_enum(node, Some(scope), &enum_ident, ctx);
+        gen_subcommand_enum(node, Some(scope), &enum_ident, groups, ctx);
     }
 
     let mut block = String::new();
+    let mut cmd_parts = Vec::new();
+    push_subcommand_interaction_settings(node, &mut cmd_parts);
+    if !cmd_parts.is_empty() {
+        block.push_str(&format!("#[command({})]\n", cmd_parts.join(", ")));
+    }
     block.push_str("#[derive(Args, Debug)]\n");
     block.push_str(&format!("pub struct {struct_ident} {{\n{fields}}}\n"));
     ctx.items.push(block);
