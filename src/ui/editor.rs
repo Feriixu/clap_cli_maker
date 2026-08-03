@@ -79,6 +79,10 @@ pub fn show(ui: &mut egui::Ui, state: &mut EditorState) -> Option<Action> {
             if ui.button("Save").clicked() {
                 state.save();
             }
+            if ui.button("Open project folder").clicked()
+                && let Err(e) = storage::open_projects_folder() {
+                    state.status = Some(format!("Couldn't open folder: {e}"));
+                }
             if let Some(status) = state.status.clone() {
                 ui.label(egui::RichText::new(status).weak());
             }
