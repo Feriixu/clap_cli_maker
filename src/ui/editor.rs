@@ -165,11 +165,29 @@ pub fn show(ui: &mut egui::Ui, state: &mut EditorState) -> Option<Action> {
                 .id_salt("code_scroll")
                 .show(ui, |ui| {
                     let mut display = state.cached_code.clone();
+                    let theme = egui_code_editor::ColorTheme::GITHUB_DARK;
+                    theme.modify_style(ui, 13.0);
+                    let highlighter = egui_code_editor::CodeEditor::default()
+                        .with_theme(theme)
+                        .with_fontsize(13.0);
+                    let syntax = egui_code_editor::Syntax::rust();
+                    let egui_ctx = ui.ctx().clone();
+                    let mut layouter = move |ui: &egui::Ui, text: &dyn egui::TextBuffer, wrap_width: f32| {
+                        let (mut job, _links) = egui_code_editor::highlighting::highlight(
+                            &egui_ctx,
+                            &highlighter,
+                            text.as_str(),
+                            &syntax,
+                        );
+                        job.wrap = egui::text::TextWrapping::wrap_at_width(wrap_width);
+                        ui.fonts_mut(|f| f.layout_job(job))
+                    };
                     ui.add(
                         egui::TextEdit::multiline(&mut display)
                             .font(egui::TextStyle::Monospace)
                             .desired_width(f32::INFINITY)
-                            .interactive(false),
+                            .interactive(false)
+                            .layouter(&mut layouter),
                     );
                 });
         });

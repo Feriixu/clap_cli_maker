@@ -615,6 +615,7 @@ dependencies = [
  "dirs",
  "eframe",
  "egui",
+ "egui_code_editor",
  "heck",
  "opener",
  "serde",
@@ -920,6 +921,16 @@ dependencies = [
  "web-time",
  "webbrowser",
  "winit",
+]
+
+[[package]]
+name = "egui_code_editor"
+version = "0.3.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "656f8eb6cc5814cb6f2b25efcba7fb255954769618036773897e4f8c60d0fb0d"
+dependencies = [
+ "egui",
+ "opener",
 ]
 
 [[package]]
