@@ -16,6 +16,12 @@ pub struct CliMakerApp {
     screen: Screen,
 }
 
+impl Default for CliMakerApp {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl CliMakerApp {
     pub fn new() -> Self {
         Self {

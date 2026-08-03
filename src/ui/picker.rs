@@ -10,6 +10,12 @@ pub struct PickerState {
     error: Option<String>,
 }
 
+impl Default for PickerState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl PickerState {
     pub fn new() -> Self {
         Self {
