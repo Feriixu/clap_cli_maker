@@ -1,11 +1,12 @@
 [package]
 name = "clap_cli_maker"
-version = "1.0.1"
+version = "1.0.2"
 edition = "2024"
 description = "A desktop app (egui/eframe) for visual design of a clap derive-style CLI, generating matching Rust struct/enum definitions."
 license = "GPL-3.0-or-later"
 keywords = ["clap", "cli", "codegen", "gui", "egui"]
 repository = "https://github.com/Feriixu/clap_cli_maker"
+categories = ["gui", "development-tools", "command-line-interface"]
 
 [dependencies]
 dirs = "6.0.0"
